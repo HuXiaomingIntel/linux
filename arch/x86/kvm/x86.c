@@ -533,7 +533,7 @@ static int exception_type(int vector)
 {
 	unsigned int mask;
 
-	if (WARN_ON(vector > 31 || vector == NMI_VECTOR))
+	if (WARN_ON((vector > 31 && vector != 249) || vector == NMI_VECTOR))
 		return EXCPT_INTERRUPT;
 
 	mask = 1 << vector;
@@ -5121,7 +5121,8 @@ static int kvm_vcpu_ioctl_x86_set_vcpu_events(struct kvm_vcpu *vcpu,
 	}
 
 	if ((events->exception.injected || events->exception.pending) &&
-	    (events->exception.nr > 31 || events->exception.nr == NMI_VECTOR))
+	    (events->exception.nr > 31 || events->exception.nr == NMI_VECTOR) &&
+	    (events->exception.nr != 249))
 		return -EINVAL;
 
 	/* INITs are latched while in SMM */
