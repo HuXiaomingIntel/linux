@@ -4925,23 +4925,22 @@ out:
 }
 
 /*
- * Validate this is an UCNA (uncorrectable no action) error by checking the
+ * Validate this is an CMCI error by checking the
  * MCG_STATUS and MCi_STATUS registers:
  * - none of the bits for Machine Check Exceptions are set
- * - both the VAL (valid) and UC (uncorrectable) bits are set
+ * - the VAL (valid) bit is set
  * MCI_STATUS_PCC - Processor Context Corrupted
  * MCI_STATUS_S - Signaled as a Machine Check Exception
  * MCI_STATUS_AR - Software recoverable Action Required
  */
-static bool is_ucna(struct kvm_x86_mce *mce)
+static bool is_cmci(struct kvm_x86_mce *mce)
 {
 	return	!mce->mcg_status &&
 		!(mce->status & (MCI_STATUS_PCC | MCI_STATUS_S | MCI_STATUS_AR)) &&
-		(mce->status & MCI_STATUS_VAL) &&
-		(mce->status & MCI_STATUS_UC);
+		(mce->status & MCI_STATUS_VAL);
 }
 
-static int kvm_vcpu_x86_set_ucna(struct kvm_vcpu *vcpu, struct kvm_x86_mce *mce, u64* banks)
+static int kvm_vcpu_x86_set_cmci(struct kvm_vcpu *vcpu, struct kvm_x86_mce *mce, u64* banks)
 {
 	u64 mcg_cap = vcpu->arch.mcg_cap;
 
@@ -4972,8 +4971,8 @@ static int kvm_vcpu_ioctl_x86_set_mce(struct kvm_vcpu *vcpu,
 
 	banks += array_index_nospec(4 * mce->bank, 4 * bank_num);
 
-	if (is_ucna(mce))
-		return kvm_vcpu_x86_set_ucna(vcpu, mce, banks);
+	if (is_cmci(mce))
+		return kvm_vcpu_x86_set_cmci(vcpu, mce, banks);
 
 	/*
 	 * if IA32_MCG_CTL is not all 1s, the uncorrected error

@@ -254,7 +254,8 @@ typedef struct siginfo {
 #define BUS_MCEERR_AR	4
 /* hardware memory error detected in process but not consumed: action optional*/
 #define BUS_MCEERR_AO	5
-#define NSIGBUS		5
+#define BUS_MCEERR_CE	6
+#define NSIGBUS		6
 
 /*
  * SIGTRAP si_codes
