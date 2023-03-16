@@ -1272,7 +1272,8 @@ static int unmap_and_move_huge_page(new_page_t get_new_page,
 		}
 		lock_page(hpage);
 	}
-
+	pr_info("unmap_and_move_huge_page, page locked, hugetlb_page_subpool: 0x%px, page_mapping: 0x%px, PageAnon: 0x%i, page_mapped: 0x%i, hpage->mapping:0x%px\n", 
+		hugetlb_page_subpool(hpage), page_mapping(hpage), PageAnon(hpage), page_mapped(hpage), hpage->mapping);
 	/*
 	 * Check for pages which are in the process of being freed.  Without
 	 * page_mapping() set, hugetlbfs specific move page routine will not

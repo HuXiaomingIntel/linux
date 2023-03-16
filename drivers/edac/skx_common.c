@@ -640,7 +640,7 @@ int skx_mce_check_error(struct notifier_block *nb, unsigned long val,
 	struct decoded_addr res;
 	struct mem_ctl_info *mci;
 	char *type;
-
+	pr_info("mce->kflags: %llx, mce->status: %llx\n", mce->kflags, mce->status);
 	if (mce->kflags & MCE_HANDLED_CEC)
 		return NOTIFY_DONE;
 
@@ -652,16 +652,22 @@ int skx_mce_check_error(struct notifier_block *nb, unsigned long val,
 	res.addr = mce->addr;
 
 	if (adxl_component_count) {
-		if (!skx_adxl_decode(&res, skx_error_in_1st_level_mem(mce)))
+		if (!skx_adxl_decode(&res, skx_error_in_1st_level_mem(mce))) {
+			pr_info("fail skx_adxl_decode, 1st:%i\n", skx_error_in_1st_level_mem(mce));
 			return NOTIFY_DONE;
+		}			
 	} else if (!skx_decode || !skx_decode(&res)) {
+		pr_info("fail skx_decode, skx_decode:%px\n", skx_decode);
 		return NOTIFY_DONE;
 	}
 
 	mci = res.dev->imc[res.imc].mci;
 
-	if (!mci)
+	if (!mci) {
+		pr_info("skx_mce_check_error, !mci\n");
 		return NOTIFY_DONE;
+	}
+		
 
 	if (mce->mcgstatus & MCG_STATUS_MCIP)
 		type = "Exception";

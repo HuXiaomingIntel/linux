@@ -467,13 +467,18 @@ static bool ghes_handle_memory_failure(struct acpi_hest_generic_data *gdata,
 	int sec_sev = ghes_severity(gdata->error_severity);
 	struct cper_sec_mem_err *mem_err = acpi_hest_get_payload(gdata);
 
+	pr_info("ghes memory failure received, phys addr 0x%llX, flags: 0x%iX\n",
+               mem_err->physical_addr, gdata->flags);
 	if (!(mem_err->validation_bits & CPER_MEM_VALID_PA))
 		return false;
 
 	/* iff following two events can be handled properly by now */
 	if (sec_sev == GHES_SEV_CORRECTED &&
-	    (gdata->flags & CPER_SEC_ERROR_THRESHOLD_EXCEEDED))
+	    (gdata->flags & CPER_SEC_ERROR_THRESHOLD_EXCEEDED)) {
 		flags = MF_SOFT_OFFLINE;
+		pr_info("soft offline triggered\n");
+	}
+		
 	if (sev == GHES_SEV_RECOVERABLE && sec_sev == GHES_SEV_RECOVERABLE)
 		flags = 0;
 
@@ -1327,6 +1332,7 @@ static int ghes_probe(struct platform_device *ghes_dev)
 		goto err;
 	}
 
+	pr_info("ghes notify type is 0x%x\n", generic->notify.type);
 	switch (generic->notify.type) {
 	case ACPI_HEST_NOTIFY_POLLED:
 		timer_setup(&ghes->timer, ghes_poll_func, 0);

@@ -505,6 +505,7 @@ static void collect_procs_anon(struct page *page, struct list_head *to_kill,
 	struct anon_vma *av;
 	pgoff_t pgoff;
 
+	pr_info("collect_procs_anon");
 	av = folio_lock_anon_vma_read(folio, NULL);
 	if (av == NULL)	/* Not actually mapped anymore */
 		return;
@@ -542,6 +543,7 @@ static void collect_procs_file(struct page *page, struct list_head *to_kill,
 	struct address_space *mapping = page->mapping;
 	pgoff_t pgoff;
 
+	pr_info("collect_procs_file");
 	i_mmap_lock_read(mapping);
 	read_lock(&tasklist_lock);
 	pgoff = page_to_pgoff(page);
@@ -579,6 +581,7 @@ static void collect_procs_fsdax(struct page *page,
 	struct vm_area_struct *vma;
 	struct task_struct *tsk;
 
+	pr_info("collect_procs_fsdax");
 	i_mmap_lock_read(mapping);
 	read_lock(&tasklist_lock);
 	for_each_process(tsk) {
@@ -1243,6 +1246,7 @@ static int __get_hwpoison_page(struct page *page, unsigned long flags)
 	int ret = 0;
 	bool hugetlb = false;
 
+	pr_info("__get_hwpoison_page, page:0x%px, head:0x%px, flags:0x%lx", page, head, flags);
 	ret = get_hwpoison_huge_page(head, &hugetlb);
 	if (hugetlb)
 		return ret;
@@ -1807,6 +1811,7 @@ int __get_huge_page_for_hwpoison(unsigned long pfn, int flags)
 		ret = 0;
 	} else if (HPageMigratable(head)) {
 		ret = get_page_unless_zero(head);
+		pr_info("HPageMigratable with ret: %d", ret);
 		if (ret)
 			count_increased = true;
 	} else {
@@ -2574,6 +2579,8 @@ int soft_offline_page(unsigned long pfn, int flags)
 		put_ref_page(ref_page);
 		return -EIO;
 	}
+	pr_info("soft_offline_page, page: 0x%px, pfn: 0x%lx, ref_page:0x%px, flags: 0x%i\n", 
+		page, pfn, ref_page, flags);
 
 	mutex_lock(&mf_mutex);
 
@@ -2634,3 +2641,4 @@ void clear_hwpoisoned_pages(struct page *memmap, int nr_pages)
 		}
 	}
 }
+

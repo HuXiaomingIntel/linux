@@ -5677,6 +5677,8 @@ retry:
 		SetHPageMigratable(page);
 
 	unlock_page(page);
+	pr_info("hugepage %px created, mapping virtual addr: 0x%lX, pfn: 0x%lX, phys: 0x%llX\n", 
+		page, address, page_to_pfn(page), page_to_phys(page));
 out:
 	return ret;
 
@@ -7081,6 +7083,7 @@ int get_hwpoison_huge_page(struct page *page, bool *hugetlb)
 			ret = -EBUSY;
 	}
 	spin_unlock_irq(&hugetlb_lock);
+	pr_info("get_hwpoison_huge_page, page:0x%px, ret:0x%i, hugetlb:0x%i\n", page, ret, *hugetlb);
 	return ret;
 }
 

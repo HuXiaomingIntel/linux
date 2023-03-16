@@ -1763,7 +1763,7 @@ int send_sig_mceerr(int code, void __user *addr, short lsb, struct task_struct *
 {
 	struct kernel_siginfo info;
 
-	WARN_ON((code != BUS_MCEERR_AO) && (code != BUS_MCEERR_AR));
+	WARN_ON((code != BUS_MCEERR_AO) && (code != BUS_MCEERR_AR) && (code != BUS_MCEERR_CE));
 	clear_siginfo(&info);
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;

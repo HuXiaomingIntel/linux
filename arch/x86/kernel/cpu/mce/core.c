@@ -1412,11 +1412,13 @@ static noinstr void unexpected_machine_check(struct pt_regs *regs)
  */
 noinstr void do_machine_check(struct pt_regs *regs)
 {
+
 	int worst = 0, order, no_way_out, kill_current_task, lmce, taint = 0;
 	DECLARE_BITMAP(valid_banks, MAX_NR_BANKS) = { 0 };
 	DECLARE_BITMAP(toclear, MAX_NR_BANKS) = { 0 };
 	struct mce m, *final;
 	char *msg = NULL;
+	pr_info(HW_ERR "enter do_machine_check\n");
 
 	if (unlikely(mce_flags.p5))
 		return pentium_machine_check(regs);
