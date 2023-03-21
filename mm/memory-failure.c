@@ -2537,6 +2537,60 @@ static void put_ref_page(struct page *page)
 }
 
 /**
+ * if this page is hugepage && currently occupied by KVM,
+ * then forward the soft offline request to the KVM.
+ * 
+ * Returns 0 on success, this hugepage is handled by sending page offline
+ *           request to KVM, soft offline operation should stop from here.
+ *         -1 if the page is not hugepage or the page is not used by KVM,
+ *            continue the normal soft offline process.
+ * 
+ */
+int hugepage_kvm_filter(struct page *page, int flags, bool page_free) {
+	struct page *head = compound_head(page);
+	struct folio *folio = page_folio(head);
+	struct anon_vma *anon_vma = NULL;
+	int ret = -1;
+
+	if (!PageHuge(head) || page_free) {
+		// only handle the case: hugepage and this hugepage is occupied by KVM
+		return -1;
+	}
+	// when get here, we already increated the page's ref count on the hugepage head.
+	// and this page is currently used by someone
+	pr_info("hugepage_kvm_filter, page:0x%px, head:0x%px, flags:0x%i, page_free: 0x%i", 
+		page, head, flags, page_free);
+	
+	if (!hugepage_migration_supported(page_hstate(head))) {
+		return -1;
+	}
+
+	if (page_count(head) == 1) {
+		/* page was freed from under us. So we are done. */
+		return -1;
+	}
+	lock_page(head);
+	if (hugetlb_page_subpool(head) && !page_mapping(head)) {
+		goto unlock_page;
+	}
+
+	if (page_mapped(head) && PageAnon(head)) {
+		// qemu hugepage will go here
+		anon_vma = page_get_anon_vma(head);
+		if(!anon_vma) {
+			goto unlock_page;
+		}
+		notify_kvm_page_offline(folio, page);
+		put_anon_vma(anon_vma);
+		ret = 0;
+	}
+
+unlock_page:	
+	unlock_page(head);
+	return ret;
+}
+
+/**
  * soft_offline_page - Soft offline a page.
  * @pfn: pfn to soft-offline
  * @flags: flags. Same as memory_failure().
@@ -2604,6 +2658,15 @@ retry:
 
 		mutex_unlock(&mf_mutex);
 		return -EOPNOTSUPP;
+	}
+
+	if (!hugepage_kvm_filter(page, flags, ret == 0)) {
+		if (ret > 0)
+			put_page(page);
+
+		mutex_unlock(&mf_mutex);
+		pr_info("successfully send the soft offline request to kvm");
+		return 0;
 	}
 
 	if (ret > 0) {
