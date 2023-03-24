@@ -467,7 +467,7 @@ static bool ghes_handle_memory_failure(struct acpi_hest_generic_data *gdata,
 	int sec_sev = ghes_severity(gdata->error_severity);
 	struct cper_sec_mem_err *mem_err = acpi_hest_get_payload(gdata);
 
-	pr_info("ghes memory failure received, phys addr 0x%llX, flags: 0x%iX\n",
+	pr_info("ghes memory failure received, phys addr 0x%llX, flags: 0x%i\n",
                mem_err->physical_addr, gdata->flags);
 	if (!(mem_err->validation_bits & CPER_MEM_VALID_PA))
 		return false;
@@ -476,7 +476,7 @@ static bool ghes_handle_memory_failure(struct acpi_hest_generic_data *gdata,
 	if (sec_sev == GHES_SEV_CORRECTED &&
 	    (gdata->flags & CPER_SEC_ERROR_THRESHOLD_EXCEEDED)) {
 		flags = MF_SOFT_OFFLINE;
-		pr_info("soft offline triggered\n");
+		pr_info("soft offline triggered, phys addr 0x%llX\n", mem_err->physical_addr);
 	}
 		
 	if (sev == GHES_SEV_RECOVERABLE && sec_sev == GHES_SEV_RECOVERABLE)

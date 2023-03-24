@@ -2194,16 +2194,28 @@ EXPORT_SYMBOL_GPL(memory_failure);
 #define MEMORY_FAILURE_FIFO_ORDER	4
 #define MEMORY_FAILURE_FIFO_SIZE	(1 << MEMORY_FAILURE_FIFO_ORDER)
 
+#define MEMORY_FAILURE_SIGNAL_FIFO_ORDER	6
+#define MEMORY_FAILURE_SIGNAL_FIFO_SIZE	(1 << MEMORY_FAILURE_SIGNAL_FIFO_ORDER)
+
 struct memory_failure_entry {
 	unsigned long pfn;
 	int flags;
 };
 
+struct memory_failure_signal_entry {
+	struct task_struct * tsk;
+	unsigned long address;
+	unsigned short remains;
+};
+
 struct memory_failure_cpu {
 	DECLARE_KFIFO(fifo, struct memory_failure_entry,
 		      MEMORY_FAILURE_FIFO_SIZE);
+	DECLARE_KFIFO(signal_fifo, struct memory_failure_signal_entry,
+		      MEMORY_FAILURE_SIGNAL_FIFO_SIZE);
 	spinlock_t lock;
 	struct work_struct work;
+	struct delayed_work signal_work;
 };
 
 static DEFINE_PER_CPU(struct memory_failure_cpu, memory_failure_cpu);
@@ -2238,12 +2250,34 @@ void memory_failure_queue(unsigned long pfn, int flags)
 	if (kfifo_put(&mf_cpu->fifo, entry))
 		schedule_work_on(smp_processor_id(), &mf_cpu->work);
 	else
-		pr_err("buffer overflow when queuing memory failure at %#lx\n",
+		pr_err("buffer overflow when queuing memory failure vm signal at %#lx\n",
 		       pfn);
 	spin_unlock_irqrestore(&mf_cpu->lock, proc_flags);
 	put_cpu_var(memory_failure_cpu);
 }
 EXPORT_SYMBOL_GPL(memory_failure_queue);
+
+void memory_failure_queue_signal(struct task_struct * tsk, 
+					unsigned long address, unsigned short repeats)
+{
+	struct memory_failure_cpu *mf_cpu;
+	unsigned long proc_flags;
+	struct memory_failure_signal_entry entry = {
+		.tsk =		tsk,
+		.address = address,
+		.remains =	repeats,
+	};
+	mf_cpu = &get_cpu_var(memory_failure_cpu);
+	spin_lock_irqsave(&mf_cpu->lock, proc_flags);
+	if (kfifo_put(&mf_cpu->signal_fifo, entry))
+		schedule_delayed_work_on(smp_processor_id(), &mf_cpu->signal_work, HZ*30);
+	else
+		pr_err("buffer overflow when queuing memory failure at %#lx\n",
+		       address);
+	spin_unlock_irqrestore(&mf_cpu->lock, proc_flags);
+	put_cpu_var(memory_failure_cpu);
+}
+EXPORT_SYMBOL_GPL(memory_failure_queue_signal);
 
 static void memory_failure_work_func(struct work_struct *work)
 {
@@ -2263,6 +2297,36 @@ static void memory_failure_work_func(struct work_struct *work)
 			soft_offline_page(entry.pfn, entry.flags);
 		else
 			memory_failure(entry.pfn, entry.flags);
+	}
+}
+
+static void memory_failure_work_send_signal_func(struct work_struct *work)
+{
+	struct memory_failure_cpu *mf_cpu;
+	struct memory_failure_signal_entry entry = { 0, };
+	unsigned long proc_flags;
+	int gotten;
+
+	mf_cpu = container_of(work, struct memory_failure_cpu, signal_work.work);
+	for (;;) {
+		spin_lock_irqsave(&mf_cpu->lock, proc_flags);
+		gotten = kfifo_get(&mf_cpu->signal_fifo, &entry);
+		spin_unlock_irqrestore(&mf_cpu->lock, proc_flags);
+		if (!gotten)
+			break;
+		if(entry.remains > 0) {
+			send_sig_mceerr(BUS_MCEERR_CE, (void*)entry.address, PAGE_SHIFT, entry.tsk);
+			entry.remains--;
+			if(entry.remains == 0) {
+				pr_info("got an memory error signal entry with remains = 0, task: 0x%px, address:%lx\n",
+				entry.tsk, entry.address);
+				put_task_struct(entry.tsk);
+			} else
+				memory_failure_queue_signal(entry.tsk, entry.address, entry.remains);
+		} else {
+			pr_err("got an memory error signal entry with remains = 0, task: 0x%px, address:%lx\n",
+		       entry.tsk, entry.address);
+		}
 	}
 }
 
@@ -2289,6 +2353,8 @@ static int __init memory_failure_init(void)
 		spin_lock_init(&mf_cpu->lock);
 		INIT_KFIFO(mf_cpu->fifo);
 		INIT_WORK(&mf_cpu->work, memory_failure_work_func);
+		INIT_KFIFO(mf_cpu->signal_fifo);
+		INIT_DELAYED_WORK(&mf_cpu->signal_work, memory_failure_work_send_signal_func);
 	}
 
 	return 0;
@@ -2633,7 +2699,7 @@ int soft_offline_page(unsigned long pfn, int flags)
 		put_ref_page(ref_page);
 		return -EIO;
 	}
-	pr_info("soft_offline_page, page: 0x%px, pfn: 0x%lx, ref_page:0x%px, flags: 0x%i\n", 
+	pr_info("--->soft_offline_page, page: 0x%px, pfn: 0x%lx, ref_page:0x%px, flags: 0x%i\n", 
 		page, pfn, ref_page, flags);
 
 	mutex_lock(&mf_mutex);
@@ -2665,7 +2731,7 @@ retry:
 			put_page(page);
 
 		mutex_unlock(&mf_mutex);
-		pr_info("successfully send the soft offline request to kvm");
+		pr_info("successfully send the soft offline request to kvm. offline operation done");
 		return 0;
 	}
 
