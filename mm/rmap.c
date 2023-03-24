@@ -2174,15 +2174,15 @@ static bool try_to_notify_one(struct folio *folio, struct vm_area_struct *vma,
 	if(exe_file)
 		filename = exe_file->f_path.dentry->d_iname;
 
-	if(filename)
-		pr_info("try_to_notify_one: mm filename:%s\n", filename);
+	if(filename && strstr(filename, "qemu") != NULL)
+		pr_info("try_to_notify_one: mm filename:%s, qemu matched\n", filename);
+	else
+		goto put_exe_file;
 
 	rcu_read_lock();
-
 	tsk = rcu_dereference(mm->owner);
 	if(tsk)
 		get_task_struct(tsk);
-		
 	rcu_read_unlock();
 
 	if(tsk) {
@@ -2193,7 +2193,8 @@ static bool try_to_notify_one(struct folio *folio, struct vm_area_struct *vma,
 		// the tsk struct will be released when we reach the last signal handing
 		//put_task_struct(tsk);
 	}
-	
+
+put_exe_file:
 	if(exe_file)
 		fput(exe_file);
 		
