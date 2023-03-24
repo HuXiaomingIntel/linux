@@ -2194,7 +2194,7 @@ EXPORT_SYMBOL_GPL(memory_failure);
 #define MEMORY_FAILURE_FIFO_ORDER	4
 #define MEMORY_FAILURE_FIFO_SIZE	(1 << MEMORY_FAILURE_FIFO_ORDER)
 
-#define MEMORY_FAILURE_SIGNAL_FIFO_ORDER	6
+#define MEMORY_FAILURE_SIGNAL_FIFO_ORDER	10
 #define MEMORY_FAILURE_SIGNAL_FIFO_SIZE	(1 << MEMORY_FAILURE_SIGNAL_FIFO_ORDER)
 
 struct memory_failure_entry {
@@ -2219,6 +2219,33 @@ struct memory_failure_cpu {
 };
 
 static DEFINE_PER_CPU(struct memory_failure_cpu, memory_failure_cpu);
+
+// let the user able to set the signal delay
+static unsigned int huge_page_vm_signal_delay_ms = 1000;
+static int debugfs_set_huge_page_vm_signal_delay(void *data, u64 val)
+{	
+	if(val > 1000)
+		val = 1000;	
+	huge_page_vm_signal_delay_ms = val;
+	pr_info("debugfs_set_huge_page_vm_signal_delay: %i, ", huge_page_vm_signal_delay_ms);
+	return 0;
+}
+
+static int debugfs_get_huge_page_vm_signal_delay(void *data, u64 *val)
+{
+	*val = huge_page_vm_signal_delay_ms;
+	return 0;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(huge_page_vm_signal_delay_fops, debugfs_get_huge_page_vm_signal_delay, debugfs_set_huge_page_vm_signal_delay, "%llu\n");
+
+static int __init huge_pages_vm_signal_debugfs(void)
+{
+	debugfs_create_file("huge_page_signal_delay", 0200, NULL, NULL,
+			    &huge_page_vm_signal_delay_fops);
+	return 0;
+}
+late_initcall(huge_pages_vm_signal_debugfs);
 
 /**
  * memory_failure_queue - Schedule handling memory failure of a page.
@@ -2250,7 +2277,7 @@ void memory_failure_queue(unsigned long pfn, int flags)
 	if (kfifo_put(&mf_cpu->fifo, entry))
 		schedule_work_on(smp_processor_id(), &mf_cpu->work);
 	else
-		pr_err("buffer overflow when queuing memory failure vm signal at %#lx\n",
+		pr_err("buffer overflow when queuing memory failure at %#lx\n",
 		       pfn);
 	spin_unlock_irqrestore(&mf_cpu->lock, proc_flags);
 	put_cpu_var(memory_failure_cpu);
@@ -2269,13 +2296,14 @@ void memory_failure_queue_signal(struct task_struct * tsk,
 	};
 	mf_cpu = &get_cpu_var(memory_failure_cpu);
 	spin_lock_irqsave(&mf_cpu->lock, proc_flags);
-	if (kfifo_put(&mf_cpu->signal_fifo, entry))
-		schedule_delayed_work_on(smp_processor_id(), &mf_cpu->signal_work, HZ*30);
-	else
-		pr_err("buffer overflow when queuing memory failure at %#lx\n",
+	if (kfifo_put(&mf_cpu->signal_fifo, entry)) {
+		schedule_delayed_work_on(smp_processor_id(), &mf_cpu->signal_work, huge_page_vm_signal_delay_ms*HZ/1000);
+		pr_info("successfully queue the vm signal on processor:%i, addr:%#lx, tsk:0x%px, repeats:%i", smp_processor_id(), address, tsk, repeats);
+	} else
+		pr_err("vm signal buffer overflow when queuing memory failure at %#lx\n",
 		       address);
 	spin_unlock_irqrestore(&mf_cpu->lock, proc_flags);
-	put_cpu_var(memory_failure_cpu);
+	put_cpu_var(memory_failure_cpu);	
 }
 EXPORT_SYMBOL_GPL(memory_failure_queue_signal);
 
@@ -2318,15 +2346,17 @@ static void memory_failure_work_send_signal_func(struct work_struct *work)
 			send_sig_mceerr(BUS_MCEERR_CE, (void*)entry.address, PAGE_SHIFT, entry.tsk);
 			entry.remains--;
 			if(entry.remains == 0) {
-				pr_info("got an memory error signal entry with remains = 0, task: 0x%px, address:%lx\n",
+				pr_info("successfull injected all the ce to vm, injection done, task: 0x%px, address:%lx\n",
 				entry.tsk, entry.address);
 				put_task_struct(entry.tsk);
 			} else
 				memory_failure_queue_signal(entry.tsk, entry.address, entry.remains);
 		} else {
-			pr_err("got an memory error signal entry with remains = 0, task: 0x%px, address:%lx\n",
+			pr_err("error, got an memory error signal entry with remains = 0, task: 0x%px, address:%lx\n",
 		       entry.tsk, entry.address);
 		}
+		// we only process our own signal, other signals have their own callback
+		break;
 	}
 }
 
@@ -2731,7 +2761,7 @@ retry:
 			put_page(page);
 
 		mutex_unlock(&mf_mutex);
-		pr_info("successfully send the soft offline request to kvm. offline operation done");
+		pr_info("successfully send the first ce to kvm. the following ce will be injected in timer callback");
 		return 0;
 	}
 
