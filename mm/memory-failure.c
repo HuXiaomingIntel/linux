@@ -2212,15 +2212,21 @@ struct memory_failure_signal_entry {
 struct memory_failure_cpu {
 	DECLARE_KFIFO(fifo, struct memory_failure_entry,
 		      MEMORY_FAILURE_FIFO_SIZE);
-	DECLARE_KFIFO(signal_fifo, struct memory_failure_signal_entry,
-		      MEMORY_FAILURE_SIGNAL_FIFO_SIZE);
+	
 	spinlock_t lock;
 	struct work_struct work;
-	//struct delayed_work signal_work;
-	struct task_struct *signal_thread;
 };
 
 static DEFINE_PER_CPU(struct memory_failure_cpu, memory_failure_cpu);
+
+struct memory_failure_signal_struct {
+	DECLARE_KFIFO(signal_fifo, struct memory_failure_signal_entry,
+				MEMORY_FAILURE_SIGNAL_FIFO_SIZE);
+	spinlock_t lock;
+	//struct delayed_work signal_work;
+	struct task_struct *signal_thread;
+};
+static struct memory_failure_signal_struct memory_failure_signal;
 
 // let the user able to set the signal delay
 static unsigned int huge_page_vm_signal_delay_ms = 1000;
@@ -2289,22 +2295,20 @@ EXPORT_SYMBOL_GPL(memory_failure_queue);
 void memory_failure_queue_signal(struct task_struct * tsk, 
 					unsigned long address, unsigned short repeats)
 {
-	struct memory_failure_cpu *mf_cpu;
 	unsigned long proc_flags;
 	struct memory_failure_signal_entry entry = {
 		.tsk =		tsk,
 		.address = address,
 		.remains =	repeats,
 	};
-	mf_cpu = &get_cpu_var(memory_failure_cpu);
-	spin_lock_irqsave(&mf_cpu->lock, proc_flags);
-	if (kfifo_put(&mf_cpu->signal_fifo, entry)) {
+
+	spin_lock_irqsave(&memory_failure_signal.lock, proc_flags);
+	if (kfifo_put(&memory_failure_signal.signal_fifo, entry)) {
 		pr_info("successfully queue the vm signal on processor:%i, addr:%#lx, tsk:0x%px, repeats:%i", smp_processor_id(), address, tsk, repeats);
 	} else
 		pr_err("vm signal buffer overflow when queuing memory failure at %#lx\n",
 		       address);
-	spin_unlock_irqrestore(&mf_cpu->lock, proc_flags);
-	put_cpu_var(memory_failure_cpu);	
+	spin_unlock_irqrestore(&memory_failure_signal.lock, proc_flags);
 }
 EXPORT_SYMBOL_GPL(memory_failure_queue_signal);
 
@@ -2331,17 +2335,17 @@ static void memory_failure_work_func(struct work_struct *work)
 
 static int memory_failure_work_send_signal_thread(void *data)
 {
-	struct memory_failure_cpu *mf_cpu = (struct memory_failure_cpu*)data;
 	struct memory_failure_signal_entry entry = { 0, };
 	unsigned long proc_flags;
 	int gotten;
 
 	for (;;) {
+		
 		msleep(huge_page_vm_signal_delay_ms);
 
-		spin_lock_irqsave(&mf_cpu->lock, proc_flags);
-		gotten = kfifo_get(&mf_cpu->signal_fifo, &entry);
-		spin_unlock_irqrestore(&mf_cpu->lock, proc_flags);
+		spin_lock_irqsave(&memory_failure_signal.lock, proc_flags);
+		gotten = kfifo_get(&memory_failure_signal.signal_fifo, &entry);
+		spin_unlock_irqrestore(&memory_failure_signal.lock, proc_flags);
 
 		if (!gotten)
 			continue;
@@ -2349,13 +2353,13 @@ static int memory_failure_work_send_signal_thread(void *data)
 			send_sig_mceerr(BUS_MCEERR_CE, (void*)entry.address, PAGE_SHIFT, entry.tsk);
 			entry.remains--;
 			if(entry.remains == 0) {
-				pr_info("successfull injected all the ce to vm, injection done, task: 0x%px, address:%lx\n",
+				pr_info("mrt: successfull injected all the ce to vm, injection done, task: 0x%px, address:%lx\n",
 				entry.tsk, entry.address);
 				put_task_struct(entry.tsk);
 			} else
 				memory_failure_queue_signal(entry.tsk, entry.address, entry.remains);
 		} else {
-			pr_err("error, got an memory error signal entry with remains = 0, task: 0x%px, address:%lx\n",
+			pr_err("mrt: error, got an memory error signal entry with remains = 0, task: 0x%px, address:%lx\n",
 		       entry.tsk, entry.address);
 		}
 		continue;
@@ -2386,21 +2390,20 @@ static int __init memory_failure_init(void)
 		mf_cpu = &per_cpu(memory_failure_cpu, cpu);
 		spin_lock_init(&mf_cpu->lock);
 		INIT_KFIFO(mf_cpu->fifo);
-		INIT_WORK(&mf_cpu->work, memory_failure_work_func);
-		INIT_KFIFO(mf_cpu->signal_fifo);
-		mf_cpu->signal_thread =
-			kthread_create_on_node(memory_failure_work_send_signal_thread,
-					      (void *)mf_cpu,
-					      cpu_to_node(cpu),
-					      "qemu_ce_thread");
-			if (IS_ERR(mf_cpu->signal_thread)) {
-				pr_err("failed to create qemu_ce_thread\n");
-				return -EINVAL;
-			}
-		kthread_bind(mf_cpu->signal_thread, cpu);
-		wake_up_process(mf_cpu->signal_thread);
+		INIT_WORK(&mf_cpu->work, memory_failure_work_func);		
 	}
 
+	spin_lock_init(&memory_failure_signal.lock);
+	INIT_KFIFO(memory_failure_signal.signal_fifo);
+	memory_failure_signal.signal_thread =
+			kthread_create(memory_failure_work_send_signal_thread,
+					      (void *)&memory_failure_signal,
+					      "qemu_ce_thread");
+	if (IS_ERR(memory_failure_signal.signal_thread)) {
+		pr_err("failed to create qemu_ce_thread\n");
+		return -EINVAL;
+	}
+	wake_up_process(memory_failure_signal.signal_thread);
 	return 0;
 }
 core_initcall(memory_failure_init);

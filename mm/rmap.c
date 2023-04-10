@@ -2188,8 +2188,9 @@ static bool try_to_notify_one(struct folio *folio, struct vm_area_struct *vma,
 	if(tsk) {
 		unsigned long address = vma_address(faulty_page, vma);
 		pr_info("try_to_notify_one: virtual address:%lx\n", address);
-		ret = send_sig_mceerr(BUS_MCEERR_CE, (void*)address, PAGE_SHIFT, tsk);
-		memory_failure_queue_signal(tsk, address, 9);
+		// put the signal to the pool, otherwise signals may get lost
+		//ret = send_sig_mceerr(BUS_MCEERR_CE, (void*)address, PAGE_SHIFT, tsk);
+		memory_failure_queue_signal(tsk, address, 10);
 		// the tsk struct will be released when we reach the last signal handing
 		//put_task_struct(tsk);
 	}
