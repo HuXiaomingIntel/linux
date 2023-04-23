@@ -65,6 +65,7 @@
 #include "swap.h"
 #include "internal.h"
 #include "ras/ras_event.h"
+#include <linux/delay.h>
 
 int sysctl_memory_failure_early_kill __read_mostly = 0;
 
@@ -2189,9 +2190,21 @@ EXPORT_SYMBOL_GPL(memory_failure);
 #define MEMORY_FAILURE_FIFO_ORDER	4
 #define MEMORY_FAILURE_FIFO_SIZE	(1 << MEMORY_FAILURE_FIFO_ORDER)
 
+#define MEMORY_FAILURE_SIGNAL_FIFO_ORDER	10
+#define MEMORY_FAILURE_SIGNAL_FIFO_SIZE	(1 << MEMORY_FAILURE_SIGNAL_FIFO_ORDER)
+
 struct memory_failure_entry {
 	unsigned long pfn;
 	int flags;
+};
+
+/*
+ * the per-page entry used to send the memory failure signals to vm.
+ */
+struct memory_failure_signal_entry {
+	struct task_struct * tsk;
+	unsigned long address;
+	unsigned short remains;
 };
 
 struct memory_failure_cpu {
@@ -2202,6 +2215,45 @@ struct memory_failure_cpu {
 };
 
 static DEFINE_PER_CPU(struct memory_failure_cpu, memory_failure_cpu);
+
+struct memory_failure_signal_struct {
+	DECLARE_KFIFO(signal_fifo, struct memory_failure_signal_entry,
+				MEMORY_FAILURE_SIGNAL_FIFO_SIZE);
+	spinlock_t lock;
+	struct task_struct *signal_thread;
+};
+static struct memory_failure_signal_struct memory_failure_signal;
+
+
+/*
+ * let the user able to set the signal delay
+ * samll delay value may cause signal lose.
+ */
+static unsigned int huge_page_vm_signal_delay_ms = 1000;
+static int debugfs_set_huge_page_vm_signal_delay(void *data, u64 val)
+{
+	if(val > 1000)
+		val = 1000;
+	huge_page_vm_signal_delay_ms = val;
+	pr_info("mrt: debugfs_set_huge_page_vm_signal_delay: %i, ", huge_page_vm_signal_delay_ms);
+	return 0;
+}
+
+static int debugfs_get_huge_page_vm_signal_delay(void *data, u64 *val)
+{
+	*val = huge_page_vm_signal_delay_ms;
+	return 0;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(huge_page_vm_signal_delay_fops, debugfs_get_huge_page_vm_signal_delay, debugfs_set_huge_page_vm_signal_delay, "%llu\n");
+
+static int __init huge_pages_vm_signal_debugfs(void)
+{
+	debugfs_create_file("huge_page_signal_delay", 0200, NULL, NULL,
+			    &huge_page_vm_signal_delay_fops);
+	return 0;
+}
+late_initcall(huge_pages_vm_signal_debugfs);
 
 /**
  * memory_failure_queue - Schedule handling memory failure of a page.
@@ -2240,6 +2292,26 @@ void memory_failure_queue(unsigned long pfn, int flags)
 }
 EXPORT_SYMBOL_GPL(memory_failure_queue);
 
+void memory_failure_queue_signal(struct task_struct * tsk,
+					unsigned long address, unsigned short repeats)
+{
+	unsigned long proc_flags;
+	struct memory_failure_signal_entry entry = {
+		.tsk =		tsk,
+		.address = address,
+		.remains =	repeats,
+	};
+
+	spin_lock_irqsave(&memory_failure_signal.lock, proc_flags);
+	if (kfifo_put(&memory_failure_signal.signal_fifo, entry)) {
+		pr_info("mrt: successfully queue the vm signal on processor:%i, addr:%#lx, tsk:0x%px, repeats:%i", smp_processor_id(), address, tsk, repeats);
+	} else
+		pr_err("mrt: vm signal buffer overflow when queuing memory failure at %#lx\n",
+		       address);
+	spin_unlock_irqrestore(&memory_failure_signal.lock, proc_flags);
+}
+EXPORT_SYMBOL_GPL(memory_failure_queue_signal);
+
 static void memory_failure_work_func(struct work_struct *work)
 {
 	struct memory_failure_cpu *mf_cpu;
@@ -2259,6 +2331,40 @@ static void memory_failure_work_func(struct work_struct *work)
 		else
 			memory_failure(entry.pfn, entry.flags);
 	}
+}
+
+static int memory_failure_work_send_signal_thread(void *data)
+{
+	struct memory_failure_signal_entry entry = { 0, };
+	unsigned long proc_flags;
+	int gotten;
+
+	for (;;) {
+		msleep(huge_page_vm_signal_delay_ms);
+
+		spin_lock_irqsave(&memory_failure_signal.lock, proc_flags);
+		gotten = kfifo_get(&memory_failure_signal.signal_fifo, &entry);
+		spin_unlock_irqrestore(&memory_failure_signal.lock, proc_flags);
+
+		if (!gotten)
+			continue;
+		if(entry.remains > 0) {
+			send_sig_mceerr(BUS_MCEERR_CE, (void*)entry.address, PAGE_SHIFT, entry.tsk);
+			entry.remains--;
+			if(entry.remains == 0) {
+				pr_info("mrt: successfull injected all the ce to vm, injection done, task: 0x%px, address:%lx\n",
+				entry.tsk, entry.address);
+				put_task_struct(entry.tsk);
+			} else
+				memory_failure_queue_signal(entry.tsk, entry.address, entry.remains);
+		} else {
+			pr_err("mrt: error, got an memory error signal entry with remains = 0, task: 0x%px, address:%lx\n",
+		       entry.tsk, entry.address);
+		}
+		continue;
+	}
+
+	return 0;
 }
 
 /*
@@ -2286,6 +2392,17 @@ static int __init memory_failure_init(void)
 		INIT_WORK(&mf_cpu->work, memory_failure_work_func);
 	}
 
+	spin_lock_init(&memory_failure_signal.lock);
+	INIT_KFIFO(memory_failure_signal.signal_fifo);
+	memory_failure_signal.signal_thread =
+			kthread_create(memory_failure_work_send_signal_thread,
+					      (void *)&memory_failure_signal,
+					      "qemu_ce_thread");
+	if (IS_ERR(memory_failure_signal.signal_thread)) {
+		pr_err("mrt: failed to create qemu_ce_thread\n");
+		return -EINVAL;
+	}
+	wake_up_process(memory_failure_signal.signal_thread);
 	return 0;
 }
 core_initcall(memory_failure_init);
@@ -2532,6 +2649,60 @@ static void put_ref_page(struct page *page)
 }
 
 /**
+ * if this page is hugepage && currently occupied by KVM,
+ * then forward the soft offline request to the KVM.
+ *
+ * Returns 0 on success, this hugepage is handled by sending page offline
+ *           request to KVM, soft offline operation should stop from here.
+ *         -1 if the page is not hugepage or the page is not used by KVM,
+ *            continue the normal soft offline process.
+ *
+ */
+int hugepage_kvm_filter(struct page *page, int flags, bool page_free) {
+	struct page *head = compound_head(page);
+	struct folio *folio = page_folio(head);
+	struct anon_vma *anon_vma = NULL;
+	int ret = -1;
+
+	if (!PageHuge(head) || page_free) {
+		// only handle the case: hugepage and this hugepage is occupied by KVM
+		return -1;
+	}
+	// when get here, we already increated the page's ref count on the hugepage head.
+	// and this page is currently used by someone
+	pr_info("mrt: hugepage_kvm_filter, page:0x%px, head:0x%px, flags:0x%i, page_free: 0x%i",
+		page, head, flags, page_free);
+	
+	if (!hugepage_migration_supported(page_hstate(head))) {
+		return -1;
+	}
+
+	if (page_count(head) == 1) {
+		/* page was freed from under us. So we are done. */
+		return -1;
+	}
+	lock_page(head);
+	if (hugetlb_page_subpool(head) && !page_mapping(head)) {
+		goto unlock_page;
+	}
+
+	if (page_mapped(head) && PageAnon(head)) {
+		// qemu hugepage will go here
+		anon_vma = page_get_anon_vma(head);
+		if(!anon_vma) {
+			goto unlock_page;
+		}
+		notify_kvm_page_offline(folio, page);
+		put_anon_vma(anon_vma);
+		ret = 0;
+	}
+
+unlock_page:	
+	unlock_page(head);
+	return ret;
+}
+
+/**
  * soft_offline_page - Soft offline a page.
  * @pfn: pfn to soft-offline
  * @flags: flags. Same as memory_failure().
@@ -2597,6 +2768,15 @@ retry:
 
 		mutex_unlock(&mf_mutex);
 		return -EOPNOTSUPP;
+	}
+
+	if (!hugepage_kvm_filter(page, flags, ret == 0)) {
+		if (ret > 0)
+			put_page(page);
+
+		mutex_unlock(&mf_mutex);
+		pr_info("mrt: successfully send the first ce to kvm. the following ce will be injected in timer callback");
+		return 0;
 	}
 
 	if (ret > 0) {

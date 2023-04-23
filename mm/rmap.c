@@ -54,6 +54,7 @@
 
 #include <linux/mm.h>
 #include <linux/sched/mm.h>
+#include <linux/sched/signal.h>
 #include <linux/sched/task.h>
 #include <linux/pagemap.h>
 #include <linux/swap.h>
@@ -2153,6 +2154,85 @@ void try_to_migrate(struct folio *folio, enum ttu_flags flags)
 		rmap_walk_locked(folio, &rwc);
 	else
 		rmap_walk(folio, &rwc);
+}
+
+/*
+ * try to notify one vm process for the page offline signal
+ */
+static bool try_to_notify_one(struct folio *folio, struct vm_area_struct *vma,
+		     unsigned long address, void *arg)
+{
+	struct page* faulty_page = (struct page*)arg;
+	struct mm_struct *mm = vma->vm_mm;
+	bool ret = true;
+	struct file *exe_file = get_mm_exe_file(mm);
+	char *filename = 0;
+	struct task_struct *tsk;
+	pr_info("mrt: try_to_notify_one: folio:%px, vma: %px, vma->vm_start: %lx, mm:%px, exe_file:%px\n", folio, vma, vma->vm_start, mm, exe_file);
+	if(exe_file)
+		filename = exe_file->f_path.dentry->d_iname;
+
+	if(filename && strstr(filename, "qemu") != NULL)
+		pr_info("mrt: try_to_notify_one: mm filename:%s, qemu matched\n", filename);
+	else
+		goto put_exe_file;
+
+	rcu_read_lock();
+
+	tsk = rcu_dereference(mm->owner);
+	if(tsk)
+		get_task_struct(tsk);
+		
+	rcu_read_unlock();
+
+	if(tsk) {
+		unsigned long address = vma_address(faulty_page, vma);
+		pr_info("try_to_notify_one: virtual address:%lx\n", address);
+		// put the signal to the pool, a separate thread do the real notification job
+		memory_failure_queue_signal(tsk, address, 10);
+		// the tsk struct will be released when we reach the last signal handing
+		//put_task_struct(tsk);
+	}
+
+put_exe_file:
+	if(exe_file)
+		fput(exe_file);
+		
+	return ret;
+}
+/**
+ * notify_kvm_page_offline - notify kvm that page offline should be applied 
+ * @folio: the folio to apply page offline for
+ * @addr: at which physical address the memory error happens
+ *
+ * Try to send page offline request to all the kvm instances that currently
+ * using this page.
+ */
+void notify_kvm_page_offline(struct folio *folio, struct page* faulty_page)
+{
+	struct rmap_walk_control rwc = {
+		.rmap_one = try_to_notify_one,
+		.arg = (void*)faulty_page,
+		.done = 0,
+		.anon_lock = folio_lock_anon_vma_read,
+	};
+
+	if (folio_is_zone_device(folio) &&
+	    (!folio_is_device_private(folio) && !folio_is_device_coherent(folio)))
+		return;
+
+	/*
+	 * During exec, a temporary VMA is setup and later moved.
+	 * The VMA is moved under the anon_vma lock but not the
+	 * page tables leading to a race where migration cannot
+	 * find the migration ptes. Rather than increasing the
+	 * locking requirements of exec(), migration skips
+	 * temporary VMAs until after exec() completes.
+	 */
+	if (!folio_test_ksm(folio) && folio_test_anon(folio))
+		rwc.invalid_vma = invalid_migration_vma;
+
+	rmap_walk(folio, &rwc);
 }
 
 #ifdef CONFIG_DEVICE_PRIVATE
